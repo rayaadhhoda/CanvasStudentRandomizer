@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Canvas Student Randomizer</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 0.5rem;
+    }
+    form {
+      border: 1px solid #ccc;
+      padding: 1rem;
+      border-radius: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    label {
+      display: block;
+      margin-top: 0.5rem;
+    }
+    input[type="number"] {
+      width: 120px;
+    }
+    button {
+      margin-top: 1rem;
+      padding: 0.4rem 0.8rem;
+      cursor: pointer;
+    }
+    #status {
+      margin: 0.5rem 0;
+      font-size: 0.95rem;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1rem;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 0.4rem 0.6rem;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #f0f0f0;
+    }
+    #downloadBtn {
+      margin-top: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Canvas Student Randomizer</h1>
+  <p>
+    Upload one or more <strong>Canvas gradebook CSVs</strong> (from different courses).
+    This tool will:
+  </p>
+  <ul>
+    <li>Combine all students across all files</li>
+    <li>Keep only students who scored <strong>≥ 1 on every assignment</strong></li>
+    <li>Randomly select the number of students you specify</li>
+  </ul>
+
+  <form id="randomizerForm">
+    <label>
+      Canvas CSV files (you can pick multiple):
+      <input type="file" id="csvFiles" accept=".csv" multiple required />
+    </label>
+
+    <label>
+      Number of students to select (across all files):
+      <input type="number" id="numStudents" min="1" required />
+    </label>
+
+    <button type="submit">Select Students</button>
+  </form>
+
+  <div id="status"></div>
+  <div id="results"></div>
+  <button id="downloadBtn" style="display:none;">Download Selected as CSV</button>
+
+  <!-- PapaParse for robust CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>
+    const form = document.getElementById("randomizerForm");
+    const fileInput = document.getElementById("csvFiles");
+    const numInput = document.getElementById("numStudents");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+    const downloadBtn = document.getElementById("downloadBtn");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      resultsEl.innerHTML = "";
+      downloadBtn.style.display = "none";
+
+      const files = Array.from(fileInput.files || []);
+      const numRequested = parseInt(numInput.value, 10);
+
+      if (!files.length) {
+        statusEl.textContent = "Please select at least one CSV file.";
+        return;
+      }
+      if (!numRequested || numRequested < 1) {
+        statusEl.textContent = "Please enter a valid number of students.";
+        return;
+      }
+
+      statusEl.textContent = "Reading and processing CSV files…";
+
+      try {
+        // Parse and filter all files
+        const eligibleStudentsAllFiles = [];
+
+        for (const file of files) {
+          const rows = await parseCsvFile(file);
+          const eligibleForFile = getEligibleStudentsFromRows(rows, file.name);
+          eligibleStudentsAllFiles.push(...eligibleForFile);
+        }
+
+        if (!eligibleStudentsAllFiles.length) {
+          statusEl.textContent = "No eligible students (score ≥ 1 on every assignment) found in any file.";
+          return;
+        }
+
+        const n = Math.min(numRequested, eligibleStudentsAllFiles.length);
+        if (n < numRequested) {
+          statusEl.textContent =
+            `Only ${eligibleStudentsAllFiles.length} students met the criteria. Showing all of them.`;
+        } else {
+          statusEl.textContent = `Randomly selected ${n} student(s) from ${eligibleStudentsAllFiles.length} eligible.`;
+        }
+
+        const selected = sampleWithoutReplacement(eligibleStudentsAllFiles, n);
+        renderResultsTable(selected);
+        setupDownload(selected);
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error processing files: " + err.message;
+      }
+    });
+
+    // Parse one CSV file using PapaParse, returning an array of row objects
+    function parseCsvFile(file) {
+      return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: "greedy",
+          complete: (results) => {
+            if (results.errors && results.errors.length) {
+              console.warn("PapaParse errors for", file.name, results.errors);
+            }
+            resolve(results.data);
+          },
+          error: (err) => {
+            reject(err);
+          },
+        });
+      });
+    }
+
+    // From one file's rows, find students who have >=1 in every assignment column
+    function getEligibleStudentsFromRows(rows, fileName) {
+      if (!rows.length) return [];
+
+      // Use keys from the first row to infer column order (Canvas headers)
+      const keys = Object.keys(rows[0]);
+
+      const idxSection = keys.indexOf("Section");
+      const idxAssignCurrent = keys.indexOf("Assignments Current Points");
+
+      if (idxSection === -1 || idxAssignCurrent === -1 || idxAssignCurrent <= idxSection + 0) {
+        console.warn(
+          `Could not find “Section” and/or “Assignments Current Points” in ${fileName}.`
+        );
+        return [];
+      }
+
+      const assignmentCols = keys.slice(idxSection + 1, idxAssignCurrent);
+
+      const eligible = [];
+
+      for (const row of rows) {
+        const studentName = (row["Student"] || "").trim();
+        if (!studentName || studentName === "Points Possible") {
+          // Skip the Canvas “Points Possible” row and any blank rows
+          continue;
+        }
+
+        // Check assignment scores
+        let isEligible = true;
+        for (const col of assignmentCols) {
+          const raw = row[col];
+          const value = raw === undefined || raw === null || raw === "" ? 0 : parseFloat(raw);
+          if (!(value >= 1)) {
+            isEligible = false;
+            break;
+          }
+        }
+
+        if (!isEligible) continue;
+
+        // Build our student object
+        eligible.push({
+          student: studentName,
+          sisUserId: row["SIS User ID"] || "",
+          sisLoginId: row["SIS Login ID"] || "",
+          course: fileName,
+        });
+      }
+
+      return eligible;
+    }
+
+    // Simple Fisher–Yates shuffle sampling without replacement
+    function sampleWithoutReplacement(array, n) {
+      const copy = array.slice();
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy.slice(0, n);
+    }
+
+    function renderResultsTable(students) {
+      if (!students.length) {
+        resultsEl.textContent = "No students selected.";
+        return;
+      }
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const tbody = document.createElement("tbody");
+
+      const headerRow = document.createElement("tr");
+      ["Student", "Student ID (SIS User ID)", "Email / Login (SIS Login ID)", "Source File"].forEach((h) => {
+        const th = document.createElement("th");
+        th.textContent = h;
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+
+      for (const s of students) {
+        const tr = document.createElement("tr");
+
+        const tdName = document.createElement("td");
+        tdName.textContent = s.student;
+        tr.appendChild(tdName);
+
+        const tdId = document.createElement("td");
+        tdId.textContent = s.sisUserId;
+        tr.appendChild(tdId);
+
+        const tdLogin = document.createElement("td");
+        tdLogin.textContent = s.sisLoginId;
+        tr.appendChild(tdLogin);
+
+        const tdCourse = document.createElement("td");
+        tdCourse.textContent = s.course;
+        tr.appendChild(tdCourse);
+
+        tbody.appendChild(tr);
+      }
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      resultsEl.innerHTML = "";
+      resultsEl.appendChild(table);
+    }
+
+    function setupDownload(students) {
+      if (!students.length) {
+        downloadBtn.style.display = "none";
+        return;
+      }
+
+      downloadBtn.style.display = "inline-block";
+
+      downloadBtn.onclick = () => {
+        const header = ["Student", "SIS User ID", "SIS Login ID", "Course"];
+        const lines = [header.join(",")];
+
+        for (const s of students) {
+          const row = [
+            csvEscape(s.student),
+            csvEscape(s.sisUserId),
+            csvEscape(s.sisLoginId),
+            csvEscape(s.course),
+          ];
+          lines.push(row.join(","));
+        }
+
+        const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "selected_students.csv";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+    }
+
+    function csvEscape(value) {
+      const str = (value ?? "").toString();
+      if (str.includes('"') || str.includes(",") || str.includes("\n")) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    }
+  </script>
+</body>
+</html>
