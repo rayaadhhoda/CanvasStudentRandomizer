@@ -23,11 +23,11 @@ The app uses:
 
 ## Usage
 
-1. Open `index.html` in any modern browser.
-2. Select one or more Canvas CSV gradebook files.
-3. Enter the number of students to randomly select.
-4. View results directly on the page.
-5. Optionally download the CSV output.
+1. Open `canvas_student_randomizer.html` in any modern browser.
+3. Select one or more Canvas CSV gradebook files.
+4. Enter the number of students to randomly select.
+5. View results directly on the page.
+6. Optionally download the CSV output.
 
 ## File Structure
 
